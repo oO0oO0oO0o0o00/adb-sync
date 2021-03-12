@@ -72,14 +72,14 @@ def list2cmdline_patch(seq):
 
         # 
         if type(arg)==bytes:
-          #try:
+          try:
             arg = arg.decode()
-          #except(UnicodeDecodeError):
-          #  print('debug:')
-          #  print(arg)
-          #  arg = arg.replace(b'\xa0', b'\xc2\xa0')
-          #  arg = arg.decode()
-          #pass
+          except(UnicodeDecodeError):
+            print('debug:')
+            print(arg)
+            arg = arg.replace(b'\xa0', b'\xc2\xa0')
+            arg = arg.decode()
+          pass
 
         needquote = (" " in arg) or ("\t" in arg) or not arg
         if needquote:
