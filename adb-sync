@@ -70,7 +70,7 @@ def list2cmdline_patch(seq):
         if result:
             result.append(' ')
 
-        # 
+        #
         if type(arg)==bytes:
           try:
             arg = arg.decode()
@@ -113,7 +113,7 @@ def list2cmdline_patch(seq):
 
 if os.name == 'nt':
   subprocess.list2cmdline = list2cmdline_patch
-  
+
 
 class OSLike(object):
 
@@ -728,7 +728,8 @@ class FileSyncer(object):
         for name, s in self.src_only[i]:
           src_name = self.src[i] + name
           dst_name = self.dst[i] + name
-          logging.info('%s: %r', self.push[i], src_name.decode() +" -> " + dst_name.decode())
+          logging.info('%s: %r', self.push[i], src_name.decode("utf-8", "replace")
+                  + " -> " + dst_name.decode("utf-8", "replace"))
           if stat.S_ISDIR(s.st_mode):
             if not self.dry_run:
               self.dst_fs[i].makedirs(dst_name)
@@ -972,7 +973,9 @@ def main() -> None:
       return
 
   for i in range(len(localpaths)):
-    logging.info('Sync: local %r, remote %r', localpaths[i], remotepaths[i])
+    logging.info('Sync: local %r, remote %r',
+            localpaths[i].decode("utf-8", "replace"),
+            remotepaths[i].decode("utf-8", "replace"))
     syncer = FileSyncer(adb, localpaths[i], remotepaths[i], excludes, local_to_remote,
                         remote_to_local, preserve_times, delete_missing,
                         allow_overwrite, allow_replace, copy_links, dry_run)
