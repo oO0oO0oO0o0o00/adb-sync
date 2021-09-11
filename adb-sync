@@ -24,8 +24,95 @@ import re
 import stat
 import subprocess
 import time
+import glob
+import fnmatch
+
 from types import TracebackType
 from typing import Callable, cast, Dict, List, IO, Iterable, Optional, Tuple, Type
+
+# windows compatible
+def list2cmdline_patch(seq):
+    """
+    Translate a sequence of arguments into a command line
+    string, using the same rules as the MS C runtime:
+
+    1) Arguments are delimited by white space, which is either a
+       space or a tab.
+
+    2) A string surrounded by double quotation marks is
+       interpreted as a single argument, regardless of white space
+       contained within.  A quoted string can be embedded in an
+       argument.
+
+    3) A double quotation mark preceded by a backslash is
+       interpreted as a literal double quotation mark.
+
+    4) Backslashes are interpreted literally, unless they
+       immediately precede a double quotation mark.
+
+    5) If backslashes immediately precede a double quotation mark,
+       every pair of backslashes is interpreted as a literal
+       backslash.  If the number of backslashes is odd, the last
+       backslash escapes the next double quotation mark as
+       described in rule 3.
+    """
+
+    # See
+    # http://msdn.microsoft.com/en-us/library/17w5ykft.aspx
+    # or search http://msdn.microsoft.com for
+    # "Parsing C++ Command-Line Arguments"
+    result = []
+    needquote = False
+    for arg in seq:
+        bs_buf = []
+
+        # Add a space to separate this argument from the others
+        if result:
+            result.append(' ')
+
+        #
+        if type(arg)==bytes:
+          try:
+            arg = arg.decode()
+          except(UnicodeDecodeError):
+            print('debug:')
+            print(arg)
+            arg = arg.replace(b'\xa0', b'\xc2\xa0')
+            arg = arg.decode()
+          pass
+
+        needquote = (" " in arg) or ("\t" in arg) or not arg
+        if needquote:
+            result.append('"')
+
+        for c in arg:
+            if c == '\\':
+                # Don't know if we need to double yet.
+                bs_buf.append(c)
+            elif c == '"':
+                # Double backslashes.
+                result.append('\\' * len(bs_buf)*2)
+                bs_buf = []
+                result.append('\\"')
+            else:
+                # Normal char
+                if bs_buf:
+                    result.extend(bs_buf)
+                    bs_buf = []
+                result.append(c)
+
+        # Add remaining backslashes, if any.
+        if bs_buf:
+            result.extend(bs_buf)
+
+        if needquote:
+            result.extend(bs_buf)
+            result.append('"')
+
+    return ''.join(result)
+
+if os.name == 'nt':
+  subprocess.list2cmdline = list2cmdline_patch
 
 
 class OSLike(object):
@@ -214,6 +301,12 @@ class AdbFileSystem(GlobLike, OSLike):
     test_strings = [
         b'(', b'(;  #`ls`$PATH\'"(\\\\\\\\){};!\xc0\xaf\xff\xc2\xbf'
     ]
+    # windows compatible
+    if os.name == 'nt':
+      s = '(;  #`ls`$PATH\'"(\\\\\\\\){};!\xc0\xaf\xff\xc2\xbf'
+      test_strings = [
+          b'(', s.encode('utf-8')
+      ]
     for test_string in test_strings:
       good = False
       with Stdout(self.adb +
@@ -231,7 +324,7 @@ class AdbFileSystem(GlobLike, OSLike):
     """List the contents of a directory, caching them for later lstat calls."""
     with Stdout(self.adb +
                 [b'shell',
-                 b'ls -al %s' % (self.QuoteArgument(path + b'/'),)]) as stdout:
+                 b'toybox ls -al %s' % (self.QuoteArgument(path + b'/'),)]) as stdout:
       for line in stdout:
         if line.startswith(b'total '):
           continue
@@ -252,7 +345,7 @@ class AdbFileSystem(GlobLike, OSLike):
       return self.stat_cache[path]
     with Stdout(
         self.adb +
-        [b'shell', b'ls -ald %s' % (self.QuoteArgument(path),)]) as stdout:
+        [b'shell', b'toybox ls -ald %s' % (self.QuoteArgument(path),)]) as stdout:
       for line in stdout:
         if line.startswith(b'total '):
           continue
@@ -269,7 +362,7 @@ class AdbFileSystem(GlobLike, OSLike):
       return self.stat_cache[path]
     with Stdout(
         self.adb +
-        [b'shell', b'ls -aldL %s' % (self.QuoteArgument(path),)]) as stdout:
+        [b'shell', b'toybox ls -aldL %s' % (self.QuoteArgument(path),)]) as stdout:
       for line in stdout:
         if line.startswith(b'total '):
           continue
@@ -300,17 +393,16 @@ class AdbFileSystem(GlobLike, OSLike):
       raise OSError('mkdir failed')
 
   def utime(self, path: bytes, times: Tuple[float, float]) -> None:
-    # TODO(rpolzer): Find out why this does not work (returns status 255).
     """Set the time of a file to a specified unix time."""
     atime, mtime = times
-    timestr = time.strftime('%Y%m%d.%H%M%S',
+    timestr = time.strftime('%Y%m%d%H%M.%S',
                             time.localtime(mtime)).encode('ascii')
     if subprocess.call(
         self.adb +
         [b'shell',
          b'touch -mt %s %s' % (timestr, self.QuoteArgument(path))]) != 0:
       raise OSError('touch failed')
-    timestr = time.strftime('%Y%m%d.%H%M%S',
+    timestr = time.strftime('%Y%m%d%H%M.%S',
                             time.localtime(atime)).encode('ascii')
     if subprocess.call(
         self.adb +
@@ -335,9 +427,8 @@ class AdbFileSystem(GlobLike, OSLike):
     if subprocess.call(self.adb + [b'pull', src, dst]) != 0:
       raise OSError('pull failed')
 
-
 def BuildFileList(fs: OSLike, path: bytes, follow_links: bool,
-                  prefix: bytes) -> Iterable[Tuple[bytes, os.stat_result]]:
+                  prefix: bytes, excludes: str, exlist:list = []) -> Iterable[Tuple[bytes, os.stat_result]]:
   """Builds a file list.
 
   Args:
@@ -352,10 +443,10 @@ def BuildFileList(fs: OSLike, path: bytes, follow_links: bool,
     Directories are yielded before their contents.
   """
   try:
-    if follow_links:
-      statresult = fs.stat(path)
-    else:
-      statresult = fs.lstat(path)
+      if follow_links:
+        statresult = fs.stat(path)
+      else:
+        statresult = fs.lstat(path)
   except OSError:
     return
   if stat.S_ISDIR(statresult.st_mode):
@@ -364,12 +455,20 @@ def BuildFileList(fs: OSLike, path: bytes, follow_links: bool,
       files = fs.listdir(path)
     except OSError:
       return
+    for x in excludes:
+      exlist.extend(glob.glob(path + b"/" + x.encode()))
+      try:
+        exlist.extend(fs.glob(path + b"/" + x.encode()))
+      except:
+        pass
     for n in files:
-      if n == b'.' or n == b'..':
+      if n == b'.' or n == b'..' or ((path + b'/' + n) in exlist) or (n.decode() in excludes):
         continue
-      for t in BuildFileList(fs, path + b'/' + n, follow_links,
-                             prefix + b'/' + n):
-        yield t
+      else:
+        for t in BuildFileList(fs, path + b'/' + n, follow_links,
+                             prefix + b'/' + n, excludes, exlist):
+          if t not in exlist:
+            yield t
   elif stat.S_ISREG(statresult.st_mode):
     yield prefix, statresult
   elif stat.S_ISLNK(statresult.st_mode) and not follow_links:
@@ -469,13 +568,14 @@ class DeleteInterruptedFile(object):
 class FileSyncer(object):
   """File synchronizer."""
 
-  def __init__(self, adb: AdbFileSystem, local_path: bytes, remote_path: bytes,
+  def __init__(self, adb: AdbFileSystem, local_path: bytes, remote_path: bytes, excludes: bytes,
                local_to_remote: bool, remote_to_local: bool,
                preserve_times: bool, delete_missing: bool,
                allow_overwrite: bool, allow_replace: bool, copy_links: bool,
                dry_run: bool) -> None:
     self.local = local_path
     self.remote = remote_path
+    self.excludes = excludes
     self.adb = adb
     self.local_to_remote = local_to_remote
     self.remote_to_local = remote_to_local
@@ -510,8 +610,8 @@ class FileSyncer(object):
     """Scans the local and remote locations and identifies differences."""
     logging.info('Scanning and diffing...')
     locallist = BuildFileList(
-        cast(OSLike, os), self.local, self.copy_links, b'')
-    remotelist = BuildFileList(self.adb, self.remote, self.copy_links, b'')
+        cast(OSLike, os), self.local, self.copy_links, b'', self.excludes)
+    remotelist = BuildFileList(self.adb, self.remote, self.copy_links, b'', self.excludes)
     self.local_only, self.both, self.remote_only = DiffLists(
         locallist, remotelist)
     if not self.local_only and not self.both and not self.remote_only:
@@ -628,7 +728,8 @@ class FileSyncer(object):
         for name, s in self.src_only[i]:
           src_name = self.src[i] + name
           dst_name = self.dst[i] + name
-          logging.info('%s: %r', self.push[i], dst_name)
+          logging.info('%s: %r', self.push[i], src_name.decode("utf-8", "replace")
+                  + " -> " + dst_name.decode("utf-8", "replace"))
           if stat.S_ISDIR(s.st_mode):
             if not self.dry_run:
               self.dst_fs[i].makedirs(dst_name)
@@ -756,6 +857,12 @@ def main() -> None:
       action='store_true',
       help='Reverse sync (pull, not push).')
   parser.add_argument(
+      '-x',
+      '--exclude',
+      metavar='EXCLUDE',
+      type=str,
+      help='Glob exclude pattern (multiple with comma separation)')
+  parser.add_argument(
       '-2',
       '--two-way',
       action='store_true',
@@ -827,13 +934,16 @@ def main() -> None:
       src, dst = FixPath(src, remotepath)
       localpaths.append(src)
       remotepaths.append(dst)
-
   preserve_times = args.times
   delete_missing = args.delete
   allow_replace = args.force
   allow_overwrite = not args.no_clobber
   copy_links = args.copy_links
   dry_run = args.dry_run
+  try:
+    excludes = args.exclude.split(",")
+  except:
+    excludes = args.exclude if args.exclude else ""
   local_to_remote = True
   remote_to_local = False
   if args.two_way:
@@ -863,8 +973,10 @@ def main() -> None:
       return
 
   for i in range(len(localpaths)):
-    logging.info('Sync: local %r, remote %r', localpaths[i], remotepaths[i])
-    syncer = FileSyncer(adb, localpaths[i], remotepaths[i], local_to_remote,
+    logging.info('Sync: local %r, remote %r',
+            localpaths[i].decode("utf-8", "replace"),
+            remotepaths[i].decode("utf-8", "replace"))
+    syncer = FileSyncer(adb, localpaths[i], remotepaths[i], excludes, local_to_remote,
                         remote_to_local, preserve_times, delete_missing,
                         allow_overwrite, allow_replace, copy_links, dry_run)
     if not syncer.IsWorking():
