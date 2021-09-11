@@ -324,7 +324,7 @@ class AdbFileSystem(GlobLike, OSLike):
     """List the contents of a directory, caching them for later lstat calls."""
     with Stdout(self.adb +
                 [b'shell',
-                 b'toybox ls -al %s' % (self.QuoteArgument(path + b'/'),)]) as stdout:
+                 b'ls -al %s' % (self.QuoteArgument(path + b'/'),)]) as stdout:
       for line in stdout:
         if line.startswith(b'total '):
           continue
@@ -345,7 +345,7 @@ class AdbFileSystem(GlobLike, OSLike):
       return self.stat_cache[path]
     with Stdout(
         self.adb +
-        [b'shell', b'toybox ls -ald %s' % (self.QuoteArgument(path),)]) as stdout:
+        [b'shell', b'ls -ald %s' % (self.QuoteArgument(path),)]) as stdout:
       for line in stdout:
         if line.startswith(b'total '):
           continue
@@ -362,7 +362,7 @@ class AdbFileSystem(GlobLike, OSLike):
       return self.stat_cache[path]
     with Stdout(
         self.adb +
-        [b'shell', b'toybox ls -aldL %s' % (self.QuoteArgument(path),)]) as stdout:
+        [b'shell', b'ls -aldL %s' % (self.QuoteArgument(path),)]) as stdout:
       for line in stdout:
         if line.startswith(b'total '):
           continue
